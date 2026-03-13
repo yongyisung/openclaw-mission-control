@@ -442,6 +442,8 @@ def _is_transient_transport_error(exc: BaseException) -> bool:
         "1012" in msg
         or "service restart" in msg
         or "connection closed" in msg
+        or "http 502" in msg
+        or "http 503" in msg
         or isinstance(exc, ConnectionError)
     )
 
