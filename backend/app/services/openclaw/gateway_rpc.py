@@ -431,13 +431,33 @@ async def _openclaw_connect_metadata_once(
         return await _ensure_connected(ws, first_message, config)
 
 
+_TRANSIENT_RETRY_MAX = 3
+_TRANSIENT_RETRY_DELAY_SECONDS = 3.0
+
+
+def _is_transient_transport_error(exc: BaseException) -> bool:
+    """Return True for transport errors that are likely transient (e.g. 1012 service restart)."""
+    msg = str(exc).lower()
+    return (
+        "1012" in msg
+        or "service restart" in msg
+        or "connection closed" in msg
+        or isinstance(exc, ConnectionError)
+    )
+
+
 async def openclaw_call(
     method: str,
     params: dict[str, Any] | None = None,
     *,
     config: GatewayConfig,
 ) -> object:
-    """Call a gateway RPC method and return the result payload."""
+    """Call a gateway RPC method and return the result payload.
+
+    Retries up to ``_TRANSIENT_RETRY_MAX`` times for transient transport errors
+    (e.g. WebSocket 1012 service-restart close frames) with a fixed delay between
+    attempts.
+    """
     gateway_url = _build_gateway_url(config)
     started_at = perf_counter()
     logger.debug(
@@ -450,40 +470,63 @@ async def openclaw_call(
         config.allow_insecure_tls,
         config.disable_device_pairing,
     )
-    try:
-        payload = await _openclaw_call_once(
-            method,
-            params,
-            config=config,
-            gateway_url=gateway_url,
-        )
-        logger.debug(
-            "gateway.rpc.call.success method=%s duration_ms=%s",
-            method,
-            int((perf_counter() - started_at) * 1000),
-        )
-        return payload
-    except OpenClawGatewayError:
-        logger.warning(
-            "gateway.rpc.call.gateway_error method=%s duration_ms=%s",
-            method,
-            int((perf_counter() - started_at) * 1000),
-        )
-        raise
-    except (
-        TimeoutError,
-        ConnectionError,
-        OSError,
-        ValueError,
-        WebSocketException,
-    ) as exc:  # pragma: no cover - network/protocol errors
-        logger.error(
-            "gateway.rpc.call.transport_error method=%s duration_ms=%s error_type=%s",
-            method,
-            int((perf_counter() - started_at) * 1000),
-            exc.__class__.__name__,
-        )
-        raise OpenClawGatewayError(str(exc)) from exc
+
+    last_exc: BaseException | None = None
+    for attempt in range(1, _TRANSIENT_RETRY_MAX + 1):
+        try:
+            payload = await _openclaw_call_once(
+                method,
+                params,
+                config=config,
+                gateway_url=gateway_url,
+            )
+            logger.debug(
+                "gateway.rpc.call.success method=%s duration_ms=%s attempt=%s",
+                method,
+                int((perf_counter() - started_at) * 1000),
+                attempt,
+            )
+            return payload
+        except OpenClawGatewayError:
+            logger.warning(
+                "gateway.rpc.call.gateway_error method=%s duration_ms=%s attempt=%s",
+                method,
+                int((perf_counter() - started_at) * 1000),
+                attempt,
+            )
+            raise
+        except (
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            ValueError,
+            WebSocketException,
+        ) as exc:
+            last_exc = exc
+            if attempt < _TRANSIENT_RETRY_MAX and _is_transient_transport_error(exc):
+                logger.warning(
+                    "gateway.rpc.call.transient_retry method=%s attempt=%s/%s "
+                    "error_type=%s delay_s=%s",
+                    method,
+                    attempt,
+                    _TRANSIENT_RETRY_MAX,
+                    exc.__class__.__name__,
+                    _TRANSIENT_RETRY_DELAY_SECONDS,
+                )
+                await asyncio.sleep(_TRANSIENT_RETRY_DELAY_SECONDS)
+                continue
+            logger.error(
+                "gateway.rpc.call.transport_error method=%s duration_ms=%s "
+                "error_type=%s attempt=%s",
+                method,
+                int((perf_counter() - started_at) * 1000),
+                exc.__class__.__name__,
+                attempt,
+            )
+            raise OpenClawGatewayError(str(exc)) from exc
+
+    # Should not reach here, but guard against it.
+    raise OpenClawGatewayError(str(last_exc)) from last_exc
 
 
 async def openclaw_connect_metadata(*, config: GatewayConfig) -> object:
