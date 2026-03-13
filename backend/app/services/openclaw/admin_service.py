@@ -241,11 +241,28 @@ class GatewayAdminLifecycleService(OpenClawDBService):
                 action,
             )
             raise
+        # Defensive: ensure the agent status is persisted as "online" even if
+        # the ORM identity-map / session auto-flush reverted the status set by
+        # mark_provision_complete inside run_lifecycle.
+        if provisioned.status != "online":
+            self.logger.warning(
+                "gateway.main_agent.provision_status_fixup gateway_id=%s agent_id=%s "
+                "expected=online actual=%s",
+                gateway.id,
+                provisioned.id,
+                provisioned.status,
+            )
+            provisioned.status = "online"
+            provisioned.updated_at = utcnow()
+            self.session.add(provisioned)
+            await self.session.commit()
+            await self.session.refresh(provisioned)
         self.logger.info(
-            "gateway.main_agent.provision_success gateway_id=%s agent_id=%s action=%s",
+            "gateway.main_agent.provision_success gateway_id=%s agent_id=%s action=%s status=%s",
             gateway.id,
             provisioned.id,
             action,
+            provisioned.status,
         )
         return provisioned
 
