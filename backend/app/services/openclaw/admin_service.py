@@ -279,7 +279,14 @@ class GatewayAdminLifecycleService(OpenClawDBService):
             gateway.id,
             action,
         )
-        agent, _ = await self.upsert_main_agent_record(gateway)
+        agent, changed = await self.upsert_main_agent_record(gateway)
+        # Flush upsert changes so the ORM identity-map is clean before
+        # run_lifecycle commits its own status transitions.  Without this
+        # flush, the dirty "provisioning" state from upsert can be
+        # auto-flushed *after* run_lifecycle commits "online", reverting
+        # the status.
+        if changed:
+            await self.session.flush()
         return await self.provision_main_agent_record(
             gateway,
             agent,
