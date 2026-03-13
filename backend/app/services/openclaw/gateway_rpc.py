@@ -431,8 +431,8 @@ async def _openclaw_connect_metadata_once(
         return await _ensure_connected(ws, first_message, config)
 
 
-_TRANSIENT_RETRY_MAX = 3
-_TRANSIENT_RETRY_DELAY_SECONDS = 3.0
+_TRANSIENT_RETRY_MAX = 6
+_TRANSIENT_RETRY_DELAY_SECONDS = 5.0
 
 
 def _is_transient_transport_error(exc: BaseException) -> bool:

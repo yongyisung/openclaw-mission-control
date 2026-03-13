@@ -846,7 +846,10 @@ class AgentLifecycleService(OpenClawDBService):
     def to_agent_read(cls, agent: Agent) -> AgentRead:
         model = AgentRead.model_validate(agent, from_attributes=True)
         return model.model_copy(
-            update={"is_gateway_main": cls.is_gateway_main(agent)},
+            update={
+                "is_gateway_main": cls.is_gateway_main(agent),
+                "status": cls.computed_status(agent),
+            },
         )
 
     @staticmethod
@@ -865,14 +868,34 @@ class AgentLifecycleService(OpenClawDBService):
         return await Gateway.objects.by_id(agent.gateway_id).first(self.session)
 
     @classmethod
-    def with_computed_status(cls, agent: Agent) -> Agent:
+    def computed_status(cls, agent: Agent) -> str:
+        """Derive display status without mutating the ORM object.
+
+        Previous implementation mutated ``agent.status`` in-place which caused
+        the ORM identity-map (with ``expire_on_commit=False``) to auto-flush
+        the computed value back to the database, overwriting the authoritative
+        lifecycle status.
+        """
         now = utcnow()
         if agent.status in {"deleting", "updating"}:
-            return agent
+            return agent.status
         if agent.last_seen_at is None:
-            agent.status = "provisioning"
-        elif now - agent.last_seen_at > OFFLINE_AFTER:
-            agent.status = "offline"
+            # Respect the authoritative DB status.  An agent that just
+            # provisioned successfully is "online" even if it hasn't sent a
+            # heartbeat yet.  Only show "provisioning" if the lifecycle
+            # itself hasn't completed.
+            return agent.status
+        if now - agent.last_seen_at > OFFLINE_AFTER:
+            return "offline"
+        return agent.status
+
+    @classmethod
+    def with_computed_status(cls, agent: Agent) -> Agent:
+        """Return agent with display status applied (READ-ONLY convenience).
+
+        NOTE: This no longer mutates the ORM object.  The computed status is
+        only applied to the Pydantic read-model via ``to_agent_read``.
+        """
         return agent
 
     @classmethod
